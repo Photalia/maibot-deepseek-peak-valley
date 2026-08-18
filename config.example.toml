@@ -1,0 +1,16 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[schedule]
+# 留空时只启用 /峰谷，不进行主动播报。
+enabled = true
+target_group_ids = []
+# 切换后允许补发／重试的时间窗口。
+grace_seconds = 120
+
+[rate_limit]
+# 同一用户的查询冷却。
+user_cooldown_seconds = 30
+# 同一聊天流的查询冷却，阻挡多人同时刷屏。
+stream_cooldown_seconds = 5
