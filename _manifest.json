@@ -1,0 +1,39 @@
+{
+  "manifest_version": 2,
+  "id": "photalia.deepseek-peak-valley",
+  "version": "1.0.0",
+  "name": "DeepSeek 峰谷價格播報",
+  "description": "在 DeepSeek V4 峰谷價格切換時主動播報，並提供 /峰谷 即時查詢與防刷冷卻。",
+  "author": {
+    "name": "Photalia",
+    "url": "https://github.com/Photalia"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/Photalia/maibot-deepseek-peak-valley",
+    "homepage": "https://github.com/Photalia/maibot-deepseek-peak-valley",
+    "documentation": "https://github.com/Photalia/maibot-deepseek-peak-valley#readme",
+    "issues": "https://github.com/Photalia/maibot-deepseek-peak-valley/issues"
+  },
+  "host_application": {
+    "min_version": "1.1.4",
+    "max_version": "1.99.99"
+  },
+  "sdk": {
+    "min_version": "2.5.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "send.text",
+    "chat.get_stream_by_group_id",
+    "chat.open_session",
+    "config.get"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}
