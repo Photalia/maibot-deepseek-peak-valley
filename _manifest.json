@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "photalia.deepseek-peak-valley",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "DeepSeek 峰谷價格播報",
-  "description": "在 DeepSeek V4 峰谷價格切換時主動播報，並提供 /峰谷 即時查詢與防刷冷卻。",
+  "description": "每天透過已配置的 Exa MCP 更新 DeepSeek V4 官方價格與峰谷規則，由 Replyer 生成每日銳評。",
   "author": {
     "name": "Photalia",
     "url": "https://github.com/Photalia"
@@ -16,7 +16,7 @@
     "issues": "https://github.com/Photalia/maibot-deepseek-peak-valley/issues"
   },
   "host_application": {
-    "min_version": "1.1.4",
+    "min_version": "1.2.0",
     "max_version": "1.99.99"
   },
   "sdk": {
@@ -28,7 +28,8 @@
     "send.text",
     "chat.get_stream_by_group_id",
     "chat.open_session",
-    "config.get"
+    "config.get",
+    "llm.generate"
   ],
   "i18n": {
     "default_locale": "zh-CN",

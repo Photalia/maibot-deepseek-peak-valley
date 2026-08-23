@@ -1,4 +1,4 @@
-"""不安装 MaiBot SDK 时也能运行的纯时间／价格回归测试。"""
+"""不安裝 MaiBot SDK 時也能執行的價格抓取與峰谷回歸測試。"""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-
-# plugin.py 的价格函数本身不依赖 SDK；这里只提供导入阶段所需的最小桩。
 fake_sdk = types.ModuleType("maibot_sdk")
 
 
@@ -46,42 +44,89 @@ plugin_path = Path(__file__).resolve().parents[1] / "plugin.py"
 spec = importlib.util.spec_from_file_location("deepseek_peak_valley_plugin", plugin_path)
 assert spec and spec.loader
 plugin = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = plugin
 spec.loader.exec_module(plugin)
 
 TZ = timezone(timedelta(hours=8))
+FIXTURE = """
+# 模型 & 价格
+| 模型 | | | deepseek-v4-flash | deepseek-v4-pro | deepseek-v4-flash-vision-exp |
+| --- | --- | --- | --- | --- | --- |
+| 价格(1)(2) | 百万tokens输入（缓存命中） | 空闲时段 | 0.05元 | 0.15元 | 0.05元 |
+| | | 高峰时段 | 0.10元 | 0.30元 | 0.10元 |
+| | 百万tokens输入（缓存未命中） | 空闲时段 | 1.5元 | 4.5元 | 1.5元 |
+| | | 高峰时段 | 3.0元 | 9.0元 | 3.0元 |
+| | 百万tokens输出 | 空闲时段 | 4.5元 | 13.5元 | 4.5元 |
+| | | 高峰时段 | 9.0元 | 27.0元 | 9.0元 |
+
+(1) 空闲时段价格为高峰时段价格的一半。高峰时段为北京时间周一至周五 9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。
+"""
 
 
-def dt(hour: int, minute: int = 0, second: int = 0) -> datetime:
-    return datetime(2026, 8, 18, hour, minute, second, tzinfo=TZ)
+def dt(day: int, hour: int, minute: int = 0, second: int = 0) -> datetime:
+    return datetime(2026, 8, day, hour, minute, second, tzinfo=TZ)
 
 
 def main() -> None:
+    snapshot = plugin.parse_pricing_markdown(FIXTURE, dt(23, 0))
+    snapshot = plugin.PriceSnapshot(
+        effective_date=snapshot.effective_date,
+        fetched_at=snapshot.fetched_at,
+        source_url=snapshot.source_url,
+        source_method=snapshot.source_method,
+        source_digest=snapshot.source_digest,
+        peak_weekdays=snapshot.peak_weekdays,
+        peak_windows=snapshot.peak_windows,
+        prices=snapshot.prices,
+        critiques={"peak": "峰測試", "off_peak": "谷測試"},
+    )
+
+    assert snapshot.peak_weekdays == (0, 1, 2, 3, 4)
+    assert snapshot.peak_windows == ((540, 720), (840, 1080))
+    assert snapshot.prices["flash"]["peak"] == {"cache": "0.1", "input": "3", "output": "9"}
+    assert snapshot.prices["pro"]["off_peak"] == {"cache": "0.15", "input": "4.5", "output": "13.5"}
+
+    # 2026-08-17 是週一，2026-08-21 是週五，22/23 是週末。
     cases = [
-        (dt(8, 59), False, "1分钟后"),
-        (dt(9), True, "3小时后"),
-        (dt(11, 30), True, "30分钟后"),
-        (dt(12), False, "2小时后"),
-        (dt(14), True, "4小时后"),
-        (dt(18), False, "15小时后"),
+        (dt(17, 8, 59), False, "1分鐘後"),
+        (dt(17, 9), True, "3小時後"),
+        (dt(17, 12), False, "2小時後"),
+        (dt(17, 14), True, "4小時後"),
+        (dt(21, 18), False, "2天15小時後"),
+        (dt(22, 10), False, "1天23小時後"),
+        (dt(23, 14, 47), False, "18小時13分鐘後"),
     ]
     for now, expected_peak, duration in cases:
-        assert plugin.is_peak(now) is expected_peak
-        assert duration in plugin.build_report(now)
+        assert plugin.is_peak(now, snapshot) is expected_peak
+        assert duration in plugin.build_report(now, snapshot)
 
-    assert plugin.previous_transition(dt(8, 59)) == datetime(2026, 8, 17, 18, tzinfo=TZ)
-    assert plugin.previous_transition(dt(9)) == dt(9)
-    assert plugin.previous_transition(dt(13)) == dt(12)
-    assert plugin.previous_transition(dt(17)) == dt(14)
-    assert plugin.previous_transition(dt(23)) == dt(18)
+    monday_transition, monday_peak = plugin.next_transition(dt(23, 14, 47), snapshot)
+    assert monday_transition == dt(24, 9)
+    assert monday_peak is True
+    assert plugin.previous_transition(dt(23, 14, 47), snapshot) == dt(21, 18)
 
-    assert plugin.next_transition(dt(8, 59))[0] == dt(9)
-    assert plugin.next_transition(dt(12))[0] == dt(14)
-    assert plugin.next_transition(dt(18))[0] == datetime(2026, 8, 19, 9, tzinfo=TZ)
+    critiques = plugin.parse_replyer_critiques(
+        "先分析一下。\n```json\n"
+        '{"peak":"梁文峰站上山頂，風景很好，帳單也很有存在感。",'
+        '"off_peak":"梁文谷今天很安靜，錢包終於可以喘口氣。"}\n```'
+    )
+    assert critiques["peak"].startswith("梁文峰")
+    assert critiques["off_peak"].startswith("梁文谷")
+    try:
+        plugin.parse_replyer_critiques('{"peak":"輸出二十七元", "off_peak":"梁文谷休息"}')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("帶價格事實的銳評應被拒絕")
 
-    report = plugin.build_report(dt(12))
-    assert "V4 Flash:输入1.5输出4.5缓存0.05" in report
-    assert "饮料瓶评估:梁白开" in report
-    print("all pricing and transition tests passed")
+    report = plugin.build_report(dt(23, 14, 47), snapshot)
+    assert "時間：2026/08/23/14/47 週日" in report
+    assert "當前時段：「梁文谷」" in report
+    assert "V4 Flash價格：輸入1.5／輸出4.5／緩存0.05" in report
+    assert "V4 Pro價格：輸入4.5／輸出13.5／緩存0.15" in report
+    assert "下次「梁文峰」在18小時13分鐘後" in report
+    assert "銳評：谷測試" in report
+    print("all pricing fetch, weekday and transition tests passed")
 
 
 if __name__ == "__main__":

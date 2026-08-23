@@ -1,16 +1,32 @@
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [schedule]
-# 留空时只启用 /峰谷，不进行主动播报。
+# 留空時只啟用 /峰谷，不進行主動播報。
 enabled = true
 target_group_ids = []
-# 切换后允许补发／重试的时间窗口。
+# 切換後允許補發／重試的時間窗口。
 grace_seconds = 120
 
+[pricing]
+# 每天透過 MaiBot 全局配置中既有的 Exa MCP 抓取此官方頁面。
+source_url = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+exa_server_name = "ExaSearchMCP"
+# 北京時間每日更新時刻；插件啟動時若缺少當日快照也會立即補抓。
+refresh_hour = 0
+refresh_minute = 0
+fetch_max_characters = 20000
+
+[replyer]
+# 每日更新官方資料後，只呼叫一次 MaiBot 內置 Replyer，分別生成峰／谷銳評。
+enabled = true
+temperature = 0.9
+max_tokens = 240
+prompt = "根據今天的 DeepSeek 峰谷價格，各寫一句有趣、尖銳但不惡毒的短評。可以玩梁文峰／梁文谷的諧音梗。"
+
 [rate_limit]
-# 同一用户的查询冷却。
+# 同一使用者的查詢冷卻。
 user_cooldown_seconds = 30
-# 同一聊天流的查询冷却，阻挡多人同时刷屏。
+# 同一聊天流的查詢冷卻，阻擋多人同時刷屏。
 stream_cooldown_seconds = 5
