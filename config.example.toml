@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "1.0.0"
+config_version = "1.1.0"
 
 [schedule]
 # 留空时只启用 /峰谷，不进行主动播报。
@@ -9,8 +9,20 @@ target_group_ids = []
 # 切换后允许补发／重试的时间窗口。
 grace_seconds = 120
 
+[fetch]
+# 是否动态解析官方定价页（v1.1.0 起启用后，价目表不再写死，改为从官方页抓取）。
+enabled = true
+# 定时轮询抓取间隔（秒）。默认 12 小时；价格一般一天最多变化 4 次。
+poll_interval_seconds = 43200
+# 单次抓取官方页的超时（秒）。
+fetch_timeout_seconds = 10
+# 连续抓取失败达到该次数后才向群聊推送一次告警，避免刷屏。
+alert_after_failures = 3
+
 [rate_limit]
 # 同一用户的查询冷却。
 user_cooldown_seconds = 30
 # 同一聊天流的查询冷却，阻挡多人同时刷屏。
 stream_cooldown_seconds = 5
+# /checkdsapiupdate 手动检查官方更新的独立冷却（触发一次网络抓取，较重）。
+manual_check_cooldown_seconds = 60

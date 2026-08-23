@@ -1,4 +1,4 @@
-"""不安装 MaiBot SDK 时也能运行的纯时间／价格回归测试。"""
+"""不安装 MaiBot SDK 时也能运行的纯时间／价格／解析回归测试。"""
 
 from __future__ import annotations
 
@@ -46,42 +46,149 @@ plugin_path = Path(__file__).resolve().parents[1] / "plugin.py"
 spec = importlib.util.spec_from_file_location("deepseek_peak_valley_plugin", plugin_path)
 assert spec and spec.loader
 plugin = importlib.util.module_from_spec(spec)
+# dataclass 会依赖 sys.modules 中注册的模块名，须先注册再执行。
+sys.modules["deepseek_peak_valley_plugin"] = plugin
 spec.loader.exec_module(plugin)
 
-TZ = timezone(timedelta(hours=8))
+TZ = plugin.BEIJING_TZ
 
 
-def dt(hour: int, minute: int = 0, second: int = 0) -> datetime:
-    return datetime(2026, 8, 18, hour, minute, second, tzinfo=TZ)
+def dt(day: int, hour: int, minute: int = 0, second: int = 0) -> datetime:
+    """构造 2026-08 中某一天的北京时间时刻。
+
+    2026-08-18 为周二，便于对 weekday 做推导。
+    """
+    base = datetime(2026, 8, 18, 0, 0, 0, tzinfo=TZ)  # 周二
+    return base + timedelta(days=day - 18, hours=hour, minutes=minute, seconds=second)
+
+
+# 2026-08 日历：18周二 19周三 20周四 21周五 22周六 23周日 24周一
+#           29周六 30周日 31周一
+# 周末低谷规则生效日 = 2026-08-23（周日）00:00。
+# 因此 08-22（周六）在生效日之前，按旧规则仍可能高峰；08-29/08-30 才适用周末低谷。
+WEEKDAY_CASES = [
+    # (日期, 时刻, 是否高峰)
+    (19, 9, True),    # 周三 09:00 高峰
+    (19, 12, False),  # 周三 12:00 低谷
+    (19, 14, True),   # 周三 14:00 高峰
+    (19, 18, False),  # 周三 18:00 低谷
+    (21, 10, True),   # 周五 10:00 高峰
+    (21, 21, False),  # 周五 21:00 低谷
+]
+# 生效日（08-23 周日）之后的周末全天低谷。
+WEEKEND_CASES = [
+    (23, 10, False),  # 周日 10:00 低谷（生效日当天）
+    (23, 14, False),  # 周日 14:00 低谷
+    (29, 9, False),   # 下周六 09:00 低谷
+    (29, 15, False),  # 下周六 15:00 低谷
+    (30, 10, False),  # 下周日 10:00 低谷
+]
+# 生效日（08-22 周六）之前的周末按旧规则，仍可出现高峰。
+PRE_START_WEEKEND_CASES = [
+    (22, 9, True),
+    (22, 15, True),
+]
 
 
 def main() -> None:
-    cases = [
-        (dt(8, 59), False, "1分钟后"),
-        (dt(9), True, "3小时后"),
-        (dt(11, 30), True, "30分钟后"),
-        (dt(12), False, "2小时后"),
-        (dt(14), True, "4小时后"),
-        (dt(18), False, "15小时后"),
-    ]
-    for now, expected_peak, duration in cases:
-        assert plugin.is_peak(now) is expected_peak
-        assert duration in plugin.build_report(now)
+    # --- 工作日峰谷基本判断 ---
+    for day, hour, expected_peak in WEEKDAY_CASES:
+        assert plugin.is_peak(dt(day, hour)) is expected_peak, f"{day}日{hour}时 应 peak={expected_peak}"
 
-    assert plugin.previous_transition(dt(8, 59)) == datetime(2026, 8, 17, 18, tzinfo=TZ)
-    assert plugin.previous_transition(dt(9)) == dt(9)
-    assert plugin.previous_transition(dt(13)) == dt(12)
-    assert plugin.previous_transition(dt(17)) == dt(14)
-    assert plugin.previous_transition(dt(23)) == dt(18)
+    # --- 周末全天低谷 ---
+    for day, hour, expected_peak in WEEKEND_CASES:
+        assert plugin.is_peak(dt(day, hour)) is expected_peak, f"{day}日{hour}时 应 peak={expected_peak}"
 
-    assert plugin.next_transition(dt(8, 59))[0] == dt(9)
-    assert plugin.next_transition(dt(12))[0] == dt(14)
-    assert plugin.next_transition(dt(18))[0] == datetime(2026, 8, 19, 9, tzinfo=TZ)
+    # --- 生效日（8-22 周六）前的周末按旧规则，仍可出现高峰 ---
+    for day, hour, expected_peak in PRE_START_WEEKEND_CASES:
+        assert plugin.is_peak(dt(day, hour)) is expected_peak, f"{day}日{hour}时 应 peak={expected_peak}"
 
-    report = plugin.build_report(dt(12))
-    assert "V4 Flash:输入1.5输出4.5缓存0.05" in report
-    assert "饮料瓶评估:梁白开" in report
-    print("all pricing and transition tests passed")
+    # --- 切换点（工作日） ---
+    assert plugin.next_transition(dt(19, 11))[0] == dt(19, 12)
+    assert plugin.next_transition(dt(19, 12))[0] == dt(19, 14)
+    assert plugin.next_transition(dt(19, 18))[0] == dt(20, 9)  # 次日 09:00 进入高峰
+    assert plugin.next_transition(dt(19, 8))[0] == dt(19, 9)
+    assert plugin.previous_transition(dt(19, 12)) == dt(19, 12)
+    assert plugin.previous_transition(dt(19, 13)) == dt(19, 12)
+    assert plugin.previous_transition(dt(19, 8)) == dt(18, 18)
+
+    # --- 周末切换点（生效日 8-23 后）：8-28 周五 / 8-29 周六 / 8-30 周日 / 8-31 周一 ---
+    # 周五 21:00 之后，下一高峰是下周一 09:00（跳过周末）。
+    assert plugin.next_transition(dt(28, 21))[0] == dt(31, 9)  # 下周一 09:00
+    # 周六 10:00 之后仍在下周一 09:00 进入高峰。
+    assert plugin.next_transition(dt(29, 10))[0] == dt(31, 9)
+    # 周六凌晨：上一进入周末的播报点是周六 00:00。
+    assert plugin.previous_transition(dt(29, 10)) == dt(29, 0)
+    # 周日 12:00：上一播报点仍是周六 00:00（周末不重复提示）。
+    assert plugin.previous_transition(dt(30, 12)) == dt(29, 0)
+    # 周五 23:00：上一播报点是周五 18:00（进入低谷）。
+    assert plugin.previous_transition(dt(28, 23)) == dt(28, 18)
+
+    # --- 播报文本：工作日高峰 / 周末低谷 ---
+    report_peak = plugin.build_report(dt(19, 9))
+    assert "处于「梁文峰」时段" in report_peak
+    assert "五梁液" in report_peak
+    assert "周末" not in report_peak
+
+    report_weekend = plugin.build_report(dt(29, 10))
+    assert "处于「梁文谷」时段" in report_weekend
+    assert "梁白开" in report_weekend
+    assert "周末，全天按低谷价计费" in report_weekend
+
+    # --- 动态价格快照构建的播报 ---
+    snap = plugin.PricingSnapshot(
+        versions={"v4_flash": "DeepSeek-V4-Flash-0731", "v4_pro": "DeepSeek-V4-Pro-0813"},
+        price={
+            "peak": {"flash": (0.20, 6.0, 18.0), "pro": (0.60, 18.0, 54.0)},
+            "off_peak": {"flash": (0.10, 3.0, 9.0), "pro": (0.30, 9.0, 27.0)},
+        },
+    )
+    report_dyn = plugin.build_report(dt(19, 9), snap)
+    # 格式恢复 v1.0.0 原样：输入X输出Y缓存Z，整数不带 .0
+    assert "输入6输出18缓存0.2" in report_dyn
+
+    # --- 官方定价 HTML 解析（结构与真实官方表格一致：计费项×时段两行一组）---
+    sample_html = (
+        '<table><tr><th>模型版本</th><th>DeepSeek-V4-Flash-0731</th>'
+        '<th>DeepSeek-V4-Pro-0813</th><th>DeepSeek-V4-Flash-Vision-Exp</th></tr>'
+        '<tr><td>价格(1)(2)</td><td>百万tokens输入（缓存命中）</td><td>空闲时段</td>'
+        '<td>0.05元</td><td>0.15元</td><td>0.05元</td></tr>'
+        '<tr><td>高峰时段</td><td>0.10元</td><td>0.30元</td><td>0.10元</td></tr>'
+        '<tr><td>百万tokens输入（缓存未命中）</td><td>空闲时段</td>'
+        '<td>1.5元</td><td>4.5元</td><td>1.5元</td></tr>'
+        '<tr><td>高峰时段</td><td>3.0元</td><td>9.0元</td><td>3.0元</td></tr>'
+        '<tr><td>百万tokens输出</td><td>空闲时段</td>'
+        '<td>4.5元</td><td>13.5元</td><td>4.5元</td></tr>'
+        '<tr><td>高峰时段</td><td>9.0元</td><td>27.0元</td><td>9.0元</td></tr></table>'
+    )
+    parsed = plugin.parse_official_pricing(sample_html)
+    assert parsed is not None
+    assert parsed.versions["v4_flash"] == "DeepSeek-V4-Flash-0731"
+    assert parsed.versions["v4_pro"] == "DeepSeek-V4-Pro-0813"
+    assert parsed.price["off_peak"]["flash"][0] == 0.05
+    assert parsed.price["peak"]["flash"][2] == 9.0
+    assert parsed.price["peak"]["pro"][2] == 27.0
+    assert parsed.price["off_peak"]["pro"][1] == 4.5
+
+    # identity 指纹稳定
+    assert parsed.identity() == parsed.identity()
+
+    # --- 变更播报文本 ---
+    old_snap = plugin.PricingSnapshot(
+        versions={"v4_flash": "DeepSeek-V4-Flash-0731"},
+        price={"peak": {"flash": (0.10, 3.0, 9.0)}, "off_peak": {"flash": (0.05, 1.5, 4.5)}},
+    )
+    change = plugin.build_change_report(dt(20, 12), old_snap, snap)
+    assert "DeepSeek 官方定价更新" in change
+    assert "V4-Pro" in change  # pro 版本由无到有
+    assert "高峰 flash" in change  # flash 高峰价格变化
+    assert "详情见 https://api-docs.deepseek.com" in change
+
+    # 无变化时
+    no_change = plugin.build_change_report(dt(20, 12), snap, snap)
+    assert "无明细变化" in no_change
+
+    print("all pricing, transition, weekend, and parsing tests passed")
 
 
 if __name__ == "__main__":

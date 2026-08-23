@@ -28,7 +28,9 @@
     "send.text",
     "chat.get_stream_by_group_id",
     "chat.open_session",
-    "config.get"
+    "config.get",
+    "maisaka.context.append",
+    "maisaka.proactive.trigger"
   ],
   "i18n": {
     "default_locale": "zh-CN",
