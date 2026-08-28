@@ -14,7 +14,7 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -37,8 +37,6 @@ PRICING_UA = (
 
 # 周末（周六、周日）全天不再区分峰谷、统一按低谷价计费的生效日期（北京时间）。
 WEEKEND_OFF_PEAK_START = datetime(2026, 8, 23, 0, 0, 0, tzinfo=BEIJING_TZ)
-# 工作日的峰谷切换钟点（进入高峰为 True）。
-_WEEKDAY_TRANSITIONS = ((9, True), (12, False), (14, True), (18, False))
 
 # 抓取/解析失败后回退的默认价目表（与 v1.0.0 写死值一致，保证极端情况仍可播报）。
 # 单位：每百万 tokens，人民币。
@@ -89,11 +87,17 @@ class PricingSnapshot:
     #   price["peak"]["flash"] = (cache_hit, cache_miss, output)
     #   price["off_peak"]["pro"]  同理
     price: dict[str, dict[str, tuple[float, float, float]]] = field(default_factory=dict)
+    # 从官方页动态解析的高峰时段窗口，格式：[ (开始分钟, 结束分钟), ... ]，如 [(540, 720), (840, 1080)]
+    peak_windows: tuple[tuple[int, int], ...] = field(default_factory=tuple)
 
     def identity(self) -> str:
         """返回本次快照的稳定指纹，用于变更比对。"""
         return json.dumps(
-            {"versions": {k: v for k, v in sorted(self.versions.items())}, "price": self.price},
+            {
+                "versions": {k: v for k, v in sorted(self.versions.items())},
+                "price": self.price,
+                "peak_windows": list(self.peak_windows),
+            },
             ensure_ascii=False,
             sort_keys=True,
             default=str,
@@ -116,6 +120,7 @@ class PricingCache:
         return {
             "versions": self.last_snapshot.versions,
             "price": _serialize_price(self.last_snapshot.price),
+            "peak_windows": [list(w) for w in self.last_snapshot.peak_windows],
             "fetched_at": self.fetched_at,
             "consecutive_failures": self.consecutive_failures,
             "last_alert_at": self.last_alert_at,
@@ -128,8 +133,13 @@ class PricingCache:
             versions = {str(k): str(v) for k, v in (payload.get("versions") or {}).items()}
             price_dump = payload.get("price") or {}
             price = _deserialize_price(price_dump)
-            if versions or price:
-                obj.last_snapshot = PricingSnapshot(versions=versions, price=price)
+            peak_windows = tuple(
+                (int(w[0]), int(w[1])) for w in (payload.get("peak_windows") or []) if len(w) == 2
+            )
+            if versions or price or peak_windows:
+                obj.last_snapshot = PricingSnapshot(
+                    versions=versions, price=price, peak_windows=peak_windows
+                )
         except Exception:
             # 缓存损坏时忽略，回退到重新抓取。
             pass
@@ -178,6 +188,54 @@ def _parse_price_cell(value: str) -> Optional[float]:
     if re.fullmatch(r"\d+(?:\.\d+)?", stripped):
         return float(stripped)
     return None
+
+
+# 高峰时段解析失败时的回退窗口（与历史硬编码一致）：9:00-12:00、14:00-18:00。
+DEFAULT_PEAK_WINDOWS = ((540, 720), (840, 1080))
+
+
+def _parse_clock(value: str) -> int:
+    """解析 "HH:MM" 或 "HH" 为当天分钟数（0-1439）。"""
+    hour_text, _, minute_text = value.partition(":")
+    hour = int(hour_text.strip())
+    minute = int(minute_text.strip()) if minute_text.strip() else 0
+    if not 0 <= hour <= 24 or not 0 <= minute <= 59 or (hour == 24 and minute != 0):
+        raise ValueError(f"无效时刻: {value}")
+    return hour * 60 + minute
+
+
+def parse_peak_windows(html: str) -> tuple[tuple[int, int], ...]:
+    """从官方定价页 HTML 中动态解析高峰时段窗口。
+
+    官方页说明文字形如「高峰时段为北京时间 9:00 - 12:00、14:00 - 18:00」，
+    据此提取为分钟区间 [(540, 720), (840, 1080)]。
+
+    Args:
+        html: 官方定价页的原始 HTML 文本。
+
+    Returns:
+        tuple[tuple[int, int], ...]: 高峰窗口列表（分钟区间）；无法解析出有效窗口时
+        回退到 DEFAULT_PEAK_WINDOWS，保证功能不退化。
+    """
+    # 仅从「高峰时段」说明片段里提取，避免误抓页面其它「数字-数字」内容。
+    segment_start = html.find("高峰时段")
+    if segment_start == -1:
+        return DEFAULT_PEAK_WINDOWS
+    segment = html[segment_start: segment_start + 400]
+    pattern = r"(\d{1,2}(?::\d{2})?)\s*[-–—~～至]\s*(\d{1,2}(?::\d{2})?)"
+    matches = re.findall(pattern, segment)
+    windows: list[tuple[int, int]] = []
+    for start_text, end_text in matches:
+        try:
+            start = _parse_clock(start_text)
+            end = _parse_clock(end_text)
+        except ValueError:
+            continue
+        if 0 <= start < end <= 24 * 60:
+            windows.append((start, end))
+    # 去重并按开始时间排序。
+    unique_windows = sorted(set(windows), key=lambda w: w[0])
+    return tuple(unique_windows) if unique_windows else DEFAULT_PEAK_WINDOWS
 
 
 def parse_official_pricing(html: str) -> Optional[PricingSnapshot]:
@@ -300,18 +358,41 @@ def _is_weekend_off_peak(now: datetime) -> bool:
     return now.weekday() >= 5
 
 
-def is_peak(now: datetime) -> bool:
+def _transitions_from_windows(peak_windows: tuple[tuple[int, int], ...]) -> tuple[tuple[int, bool], ...]:
+    """将高峰窗口转为当日切换点序列。
+
+    每个窗口 [start, end) 产生两个切换点：start 进入高峰、end 进入低谷。
+    返回按分钟排序的 ((分钟, 是否进入高峰), ...)。
+    """
+    points: list[tuple[int, bool]] = []
+    for start, end in peak_windows or ():
+        if start < end:
+            points.append((start, True))   # 进入高峰
+            points.append((end, False))    # 退出高峰（进入低谷）
+    return tuple(sorted(set(points)))
+
+
+def _resolve_peak_windows(peak_windows: Any) -> tuple[tuple[int, int], ...]:
+    """规范化高峰窗口参数；传入 None 或空时回退默认窗口。"""
+    if not peak_windows:
+        return DEFAULT_PEAK_WINDOWS
+    return tuple((int(s), int(e)) for s, e in peak_windows if int(s) < int(e))
+
+
+def is_peak(now: datetime, peak_windows: Any = None) -> bool:
     """判斷北京時間是否為官方高峰時段。
 
-    工作日内为 9:00-12:00、14:00-18:00；周末（生效日起）全天为低谷，返回 ``False``。
+    高峰时段取自动态解析的窗口（或默认 9:00-12:00、14:00-18:00）；
+    周末（生效日起）全天为低谷，返回 ``False``。
     """
     if _is_weekend_off_peak(now):
         return False
     minute = now.hour * 60 + now.minute
-    return 9 * 60 <= minute < 12 * 60 or 14 * 60 <= minute < 18 * 60
+    windows = _resolve_peak_windows(peak_windows)
+    return any(start <= minute < end for start, end in windows)
 
 
-def _iter_transition_after(now: datetime) -> Any:
+def _iter_transition_after(now: datetime, peak_windows: Any = None) -> Any:
     """从 now 之后开始，逐日产生未来的价格切换时刻及其进入时段。
 
     Yields:
@@ -319,49 +400,52 @@ def _iter_transition_after(now: datetime) -> Any:
         周末（生效日起）全天按低谷价，与邻近低谷之间价格无变化，
         因此周末不产生任何切换点；下一个价格切换点会在后续工作日出现。
     """
+    transitions = _transitions_from_windows(_resolve_peak_windows(peak_windows))
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     scan_days = 0
     while scan_days < 8:
         if not _is_weekend_off_peak(day):
-            for hour, enters_peak in _WEEKDAY_TRANSITIONS:
-                candidate = day.replace(hour=hour, minute=0, second=0, microsecond=0)
+            for minute, enters_peak in transitions:
+                candidate = day.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=minute)
                 if candidate > now:
                     yield candidate, enters_peak
         day += timedelta(days=1)
         scan_days += 1
 
 
-def next_transition(now: datetime) -> tuple[datetime, bool]:
+def next_transition(now: datetime, peak_windows: Any = None) -> tuple[datetime, bool]:
     """回傳下一個切換時間，以及切換後是否進入高峰。
 
     基于自然日扫描，自动跳过周末的高峰切换点：
-    - 工作日 09:00/14:00 进入高峰，12:00/18:00 进入低谷；
+    - 工作日的高峰窗口起始点进入高峰、结束点进入低谷；
     - 周末（生效日起）全天为低谷，不存在高峰切换点。
     """
-    for candidate, enters_peak in _iter_transition_after(now):
+    for candidate, enters_peak in _iter_transition_after(now, peak_windows):
         return candidate, enters_peak
-    # 理论上扫描 8 天必然有结果；此处仅为防御，返回下下个工作日的 09:00。
+    # 理论上扫描 8 天必然有结果；此处仅为防御，返回下下个工作日的首个高峰窗口起点。
     tomorrow = now + timedelta(days=1)
     base = tomorrow
     while _is_weekend_off_peak(base):
         base += timedelta(days=1)
-    return base.replace(hour=9, minute=0, second=0, microsecond=0), True
+    first_start = _resolve_peak_windows(peak_windows)[0][0]
+    return base.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=first_start), True
 
 
-def previous_transition(now: datetime) -> datetime:
+def previous_transition(now: datetime, peak_windows: Any = None) -> datetime:
     """回传当前时刻之前最近一次需要播报的峰谷切换时间。
 
     工作日的峰谷/谷峰切换点都会被考虑；周末仅当从非周末首次进入周末（周六 00:00）
     时产生一次「周末低谷」播报点，避免每日 00:00 重复提示。
     """
+    transitions = _transitions_from_windows(_resolve_peak_windows(peak_windows))
     # 从当天零点起扫描，向前回退最多 8 天，只收集 <= now 的切换点。
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     found: list[datetime] = []
     for _ in range(8):
         # 工作日（含周五）的正常峰谷切换点。
         if not _is_weekend_off_peak(day):
-            for hour, _enters_peak in _WEEKDAY_TRANSITIONS:
-                candidate = day.replace(hour=hour, minute=0, second=0, microsecond=0)
+            for minute, _enters_peak in transitions:
+                candidate = day.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=minute)
                 if candidate <= now:
                     found.append(candidate)
         # 周五 → 次日周六 00:00：首次切入周末，播报「周末全天低谷」。
@@ -401,8 +485,9 @@ def build_report(now: datetime, snapshot: Optional[PricingSnapshot] = None) -> s
     Returns:
         str: 格式化的峰谷播报文本。
     """
-    peak = is_peak(now)
-    following, enters_peak = next_transition(now)
+    windows = snapshot.peak_windows if (snapshot is not None and snapshot.peak_windows) else None
+    peak = is_peak(now, windows)
+    following, enters_peak = next_transition(now, windows)
 
     def _fmt(model: str, zone: str) -> str:
         cache_miss, output, cache_hit = _price_components(snapshot, model, zone)
@@ -687,6 +772,12 @@ class DeepSeekPeakValleyPlugin(MaiBotPlugin):
             await self.ctx.send.text(f"【DeepSeek 官方更新检查失败】\n无法获取官方定价页：{exc}", stream_id)
             return True, "已回覆檢查失敗", True
 
+        # 动态解析高峰时段窗口并挂到快照上。
+        if new_snapshot is not None:
+            new_snapshot = replace(
+                new_snapshot, peak_windows=await asyncio.to_thread(parse_peak_windows, html)
+            )
+
         if new_snapshot is None or not new_snapshot.versions:
             await self.ctx.send.text(
                 "【DeepSeek 官方更新检查失败】\n已获取页面但无法解析（官方结构可能已改版）。",
@@ -720,7 +811,9 @@ class DeepSeekPeakValleyPlugin(MaiBotPlugin):
         """等待切换点，周期性刷新定价，并在价格变更/失败告警窗口内执行动作。"""
         while not self._stop_event.is_set():
             now = datetime.now(BEIJING_TZ)
-            transition = previous_transition(now)
+            snap = self._pricing_cache.last_snapshot
+            windows = snap.peak_windows if (snap is not None and snap.peak_windows) else None
+            transition = previous_transition(now, windows)
             transition_key = transition.strftime("%Y-%m-%dT%H:%M")
             grace = max(0, int(self.config.schedule.grace_seconds))
             elapsed = (now - transition).total_seconds()
@@ -733,14 +826,14 @@ class DeepSeekPeakValleyPlugin(MaiBotPlugin):
                 await self._maybe_fetch_on_schedule()
 
             now = datetime.now(BEIJING_TZ)
-            transition = previous_transition(now)
+            transition = previous_transition(now, windows)
             transition_key = transition.strftime("%Y-%m-%dT%H:%M")
             elapsed = (now - transition).total_seconds()
             retry_pending = 0 <= elapsed <= grace and not self._transition_complete(transition_key)
             if retry_pending:
                 delay = 10.0
             else:
-                upcoming, _ = next_transition(now)
+                upcoming, _ = next_transition(now, windows)
                 delay = max(0.2, (upcoming - now).total_seconds())
                 # goloop 内把下次休眠缩短为轮询间隔，保证定价会随 poll_interval 到来。
                 poll_interval = max(60, int(self.config.fetch.poll_interval_seconds))
@@ -780,6 +873,9 @@ class DeepSeekPeakValleyPlugin(MaiBotPlugin):
         snapshot = await asyncio.to_thread(parse_official_pricing, html)
         if snapshot is None or not snapshot.versions:
             raise ValueError("官方定价页无法解析（结构可能已变更）")
+        # 动态解析高峰时段窗口，并挂到快照上。
+        peak_windows = await asyncio.to_thread(parse_peak_windows, html)
+        snapshot = replace(snapshot, peak_windows=peak_windows)
 
         previous = self._pricing_cache.last_snapshot
         changed = False

@@ -135,6 +135,32 @@ def main() -> None:
     assert "梁白开" in report_weekend
     assert "周末，全天按低谷价计费" in report_weekend
 
+    # --- 动态高峰时段窗口解析 ---
+    sample_html_peak = (
+        "<div>(1) 空闲时段价格为高峰时段价格的一半。高峰时段为北京时间 "
+        "9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。"
+        "我们将于北京时间2026年8月23日（周日）00:00起，对峰谷计费规则做出调整。</div>"
+        "<div>图片宽 1024 高 768 之类不应被误抓</div>"
+    )
+    windows = plugin.parse_peak_windows(sample_html_peak)
+    assert (540, 720) in windows  # 9:00-12:00
+    assert (840, 1080) in windows  # 14:00-18:00
+    # 不应误抓页面其它数字-数字（如 1024 之类），且窗口起点不含凌晨杂散值。
+    assert all(start >= 0 for start, _end in windows)
+
+    # 基于动态窗口的 is_peak：工作日 9:30 高峰、12:30 低谷。
+    dyn_windows = ((9 * 60, 12 * 60), (14 * 60, 18 * 60))
+    assert plugin.is_peak(dt(19, 9, 30), dyn_windows) is True
+    assert plugin.is_peak(dt(19, 12, 30), dyn_windows) is False
+    assert plugin.is_peak(dt(19, 15), dyn_windows) is True
+    # 自定义动态窗口：改为 10:00-13:00 单一窗口。
+    custom_windows = ((10 * 60, 13 * 60),)
+    assert plugin.is_peak(dt(19, 10, 30), custom_windows) is True
+    assert plugin.is_peak(dt(19, 13, 30), custom_windows) is False
+
+    # 无法解析窗口时回退默认。
+    assert plugin.parse_peak_windows("<div>无高峰时段说明</div>") == plugin.DEFAULT_PEAK_WINDOWS
+
     # --- 动态价格快照构建的播报 ---
     snap = plugin.PricingSnapshot(
         versions={"v4_flash": "DeepSeek-V4-Flash-0731", "v4_pro": "DeepSeek-V4-Pro-0813"},
