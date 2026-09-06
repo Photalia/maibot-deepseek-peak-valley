@@ -29,7 +29,7 @@ MODEL_KEYS = {
 
 class PluginSectionConfig(PluginConfigBase):
     enabled: bool = Field(default=True, description="是否啟用插件")
-    config_version: str = Field(default="1.1.0", description="配置版本")
+    config_version: str = Field(default="1.1.1", description="配置版本")
 
 
 class ScheduleConfig(PluginConfigBase):
@@ -142,6 +142,15 @@ def _parse_peak_weekdays(text: str) -> tuple[int, ...]:
             return tuple(range(start, end + 1))
         return tuple(list(range(start, 7)) + list(range(0, end + 1)))
     if "工作日" in text:
+        return (0, 1, 2, 3, 4)
+    normalized = text.replace("週", "周")
+    weekend_rule = (
+        "周末" in normalized
+        and "周六" in normalized
+        and ("周日" in normalized or "周天" in normalized)
+        and ("不再区分峰谷" in normalized or "不再區分峰谷" in normalized or "低谷时段" in normalized or "低谷時段" in normalized)
+    )
+    if weekend_rule:
         return (0, 1, 2, 3, 4)
     raise ValueError("官方內容中找不到高峰星期規則")
 
@@ -479,17 +488,29 @@ class DeepSeekPeakValleyPlugin(MaiBotPlugin):
         if self._snapshot is not None and self._snapshot.effective_date >= expected_date:
             return self._snapshot
         if time.monotonic() < self._next_refresh_attempt_monotonic:
+            if self._snapshot is not None:
+                return self._snapshot
             raise RuntimeError("官方價格更新正在等待下一次重試")
         async with self._refresh_lock:
             if self._snapshot is not None and self._snapshot.effective_date >= expected_date:
                 return self._snapshot
             if time.monotonic() < self._next_refresh_attempt_monotonic:
+                if self._snapshot is not None:
+                    return self._snapshot
                 raise RuntimeError("官方價格更新正在等待下一次重試")
             try:
                 refreshed = await self._refresh_snapshot(now)
-            except Exception:
+            except Exception as exc:
                 # 避免官方頁或 MCP 故障時由十秒排程迴圈持續轟炸外部服務。
                 self._next_refresh_attempt_monotonic = time.monotonic() + 300.0
+                if self._snapshot is not None:
+                    self.ctx.logger.warning(
+                        "DeepSeek 官方價格更新失敗，未覆蓋快照並沿用 %s 資料，5 分鐘後重試：%s",
+                        self._snapshot.effective_date,
+                        exc,
+                        exc_info=True,
+                    )
+                    return self._snapshot
                 raise
             self._next_refresh_attempt_monotonic = 0.0
             self._snapshot = refreshed

@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "1.1.0"
+config_version = "1.1.1"
 
 [schedule]
 # 留空時只啟用 /峰谷，不進行主動播報。

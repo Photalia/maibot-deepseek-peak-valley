@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "photalia.deepseek-peak-valley",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "DeepSeek 峰谷價格播報",
   "description": "每天透過已配置的 Exa MCP 更新 DeepSeek V4 官方價格與峰谷規則，由 Replyer 生成每日銳評。",
   "author": {

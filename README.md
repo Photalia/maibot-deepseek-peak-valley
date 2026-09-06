@@ -94,7 +94,7 @@ cp config.example.toml config.toml
 ```toml
 [plugin]
 enabled = true
-config_version = "1.1.0"
+config_version = "1.1.1"
 
 [schedule]
 enabled = true

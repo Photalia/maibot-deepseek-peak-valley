@@ -69,6 +69,16 @@ def dt(day: int, hour: int, minute: int = 0, second: int = 0) -> datetime:
 
 def main() -> None:
     snapshot = plugin.parse_pricing_markdown(FIXTURE, dt(23, 0))
+    modern_fixture = FIXTURE.replace(
+        "高峰时段为北京时间周一至周五 9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。",
+        "高峰时段为北京时间 9:00 - 12:00、14:00 - 18:00（其余为空闲时段）。"
+        "我们将于北京时间2026年8月23日（周日）00:00起，对峰谷计费规则做出调整，"
+        "周末（周六、周日）全天不再区分峰谷时段，统一按照低谷时段价格收取调用费用。",
+    )
+    modern_snapshot = plugin.parse_pricing_markdown(modern_fixture, dt(23, 0))
+    assert modern_snapshot.peak_weekdays == (0, 1, 2, 3, 4)
+    assert modern_snapshot.peak_windows == ((540, 720), (840, 1080))
+
     snapshot = plugin.PriceSnapshot(
         effective_date=snapshot.effective_date,
         fetched_at=snapshot.fetched_at,
